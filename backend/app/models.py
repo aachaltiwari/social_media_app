@@ -1,14 +1,28 @@
+import uuid
 from django.db import models
-from django.contrib.auth.models import User
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.conf import settings 
+from django.contrib.auth.models import AbstractUser
+
+
+# ============================================================
+# 0. CUSTOM USER MODEL (UUID-based)
+# ============================================================
+class CustomUser(AbstractUser):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # You can add extra fields if needed later (bio, phone, etc.)
+
+    def __str__(self):
+        return self.username
+
 
 
 # ============================================================
 # 1. PROFILE
 # ============================================================
 class Profile(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -20,7 +34,7 @@ class Profile(models.Model):
     def __str__(self):
         return f"{self.user.username}'s Profile"
 
-    def visible_posts(self, viewer: User, page_number: int = 1, page_size: int = 10):
+    def visible_posts(self, viewer, page_number: int = 1, page_size: int = 10):
         """Return paginated posts visible to the viewer (only friends or owner)."""
         if not viewer.is_authenticated:
             return self.user.posts.none()
@@ -29,14 +43,13 @@ class Profile(models.Model):
             return self.user.posts.all().order_by('-created_at')[
                 (page_number - 1) * page_size : page_number * page_size
             ]
-
         return self.user.posts.none()
 
-    def is_friend_with(self, other_user: User):
+    def is_friend_with(self, other_user):
         """Check if current profile is friends with another user."""
         return self.friends.filter(pk=other_user.profile.pk).exists()
 
-    def send_friend_request(self, to_user: User):
+    def send_friend_request(self, to_user):
         """Helper to safely send a friend request."""
         if to_user == self.user:
             raise ValueError("You cannot send a friend request to yourself.")
@@ -44,8 +57,18 @@ class Profile(models.Model):
             raise ValueError("Friend request already sent.")
         return FriendRequest.objects.create(sender=self.user, receiver=to_user)
 
+    def get_friends(self, page_number: int = 1, page_size: int = 10):
+        """Return paginated list of this user's friends."""
+        start = (page_number - 1) * page_size
+        end = page_number * page_size
+        return self.friends.all()[start:end]
 
-@receiver(post_save, sender=User)
+    def friend_count(self):
+        """Return total number of friends of the user."""
+        return self.friends.count()
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def create_user_profile(sender, instance, created, **kwargs):
     if created:
         Profile.objects.create(user=instance)
@@ -61,8 +84,8 @@ class FriendRequest(models.Model):
         ("rejected", "Rejected"),
     ]
 
-    sender = models.ForeignKey(User, related_name="sent_requests", on_delete=models.CASCADE)
-    receiver = models.ForeignKey(User, related_name="received_requests", on_delete=models.CASCADE)
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="sent_requests", on_delete=models.CASCADE)
+    receiver = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="received_requests", on_delete=models.CASCADE)
     status = models.CharField(max_length=8, choices=STATUS_CHOICES, default="pending")
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -74,7 +97,6 @@ class FriendRequest(models.Model):
         return f"{self.sender.username} → {self.receiver.username} ({self.status})"
 
     def accept(self):
-        """Accept the friend request and add both as friends."""
         if self.status != "pending":
             return
         self.status = "accepted"
@@ -85,13 +107,11 @@ class FriendRequest(models.Model):
         receiver_profile.friends.add(sender_profile)
 
     def reject(self):
-        """Reject a pending friend request."""
         if self.status == "pending":
             self.status = "rejected"
             self.delete()
 
     def cancel(self):
-        """Cancel a pending request."""
         if self.status == "pending":
             self.delete()
 
@@ -100,7 +120,7 @@ class FriendRequest(models.Model):
 # 3. POST
 # ============================================================
 class Post(models.Model):
-    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="posts")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="posts")
     content = models.TextField()
     image = models.ImageField(upload_to="posts/", blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -114,7 +134,6 @@ class Post(models.Model):
         return f"Post #{self.pk} by {self.author.username}"
 
     def has_reacted(self, user):
-        """Check if the given user has already reacted to this post."""
         if not user.is_authenticated:
             return False
         return self.reactions.filter(user=user).exists()
@@ -129,7 +148,7 @@ class Post(models.Model):
 
 
 # ============================================================
-# 4. REACTION (Like / Love / Haha / Angry / Sad)
+# 4. REACTION
 # ============================================================
 class Reaction(models.Model):
     REACTION_CHOICES = [
@@ -141,12 +160,12 @@ class Reaction(models.Model):
     ]
 
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name="reactions")
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="user_reactions")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="user_reactions")
     reaction_type = models.CharField(max_length=10, choices=REACTION_CHOICES, default="like")
     created_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ("post", "user")  # Only one reaction per user per post
+        unique_together = ("post", "user")
         indexes = [models.Index(fields=["post", "user", "reaction_type"])]
 
     def __str__(self):
@@ -158,7 +177,7 @@ class Reaction(models.Model):
 # ============================================================
 class Comment(models.Model):
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name="comments")
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="user_comments")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="user_comments")
     text = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -169,8 +188,7 @@ class Comment(models.Model):
     def __str__(self):
         return f"{self.user.username} commented on Post #{self.post.pk}"
 
-    def can_user_comment(self, user: User):
-        """Check if a user can comment (must be post author or friend)."""
+    def can_user_comment(self, user):
         post_author = self.post.author
         if user == post_author:
             return True
