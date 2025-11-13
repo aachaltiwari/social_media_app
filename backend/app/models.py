@@ -11,8 +11,7 @@ from django.contrib.auth.models import AbstractUser
 # ============================================================
 class CustomUser(AbstractUser):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    # You can add extra fields if needed later (bio, phone, etc.)
-
+    
     def __str__(self):
         return self.username
 
@@ -22,7 +21,9 @@ class CustomUser(AbstractUser):
 # 1. PROFILE
 # ============================================================
 class Profile(models.Model):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile"
+    )
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -34,40 +35,82 @@ class Profile(models.Model):
     def __str__(self):
         return f"{self.user.username}'s Profile"
 
+    
+    # 1. Visible posts for viewer
     def visible_posts(self, viewer, page_number: int = 1, page_size: int = 10):
         """Return paginated posts visible to the viewer (only friends or owner)."""
-        if not viewer.is_authenticated:
-            return self.user.posts.none()
-
-        if viewer == self.user or self.friends.filter(pk=viewer.profile.pk).exists():
+        if viewer == self.user or self.is_friend_with(viewer):
             return self.user.posts.all().order_by('-created_at')[
                 (page_number - 1) * page_size : page_number * page_size
             ]
         return self.user.posts.none()
 
+   
+    # 2. Check if user is friend with another user
     def is_friend_with(self, other_user):
         """Check if current profile is friends with another user."""
         return self.friends.filter(pk=other_user.profile.pk).exists()
 
+    
+    # 3. Send friend request helper
     def send_friend_request(self, to_user):
-        """Helper to safely send a friend request."""
+        """Safely send a friend request."""
         if to_user == self.user:
             raise ValueError("You cannot send a friend request to yourself.")
         if FriendRequest.objects.filter(sender=self.user, receiver=to_user, status="pending").exists():
             raise ValueError("Friend request already sent.")
         return FriendRequest.objects.create(sender=self.user, receiver=to_user)
 
-    def get_friends(self, page_number: int = 1, page_size: int = 10):
-        """Return paginated list of this user's friends."""
-        start = (page_number - 1) * page_size
-        end = page_number * page_size
-        return self.friends.all()[start:end]
+    # 4. Get friends visible to a viewer
+    def get_friends(self, viewer=None, page_number: int = 1, page_size: int = 10):
+        """
+        Return the list of friends visible to the viewer.
+        - If viewer is the same user or a friend → show all friends.
+        - If viewer is not a friend → show only mutual friends.
+        """
+        if viewer is None or not viewer.is_authenticated:
+            return self.friends.none()
 
+        if viewer == self.user or self.is_friend_with(viewer):
+            # Viewer is owner or friend → show all friends
+            return self.friends.all()[(page_number - 1) * page_size : page_number * page_size]
+
+        # Viewer is not a friend → show mutual friends only
+        return self.get_mutual_friends(viewer)[(page_number - 1) * page_size : page_number * page_size]
+
+   
+    # 5. Get mutual friends list
+    def get_mutual_friends(self, viewer):
+        """
+        Return queryset of mutual friends between self and viewer.
+        Visible to any authenticated viewer.
+        """
+        if not viewer.is_authenticated or viewer == self.user:
+            return self.friends.none()
+
+        # Friends of this profile
+        my_friends = self.friends.all()
+        # Friends of the viewer
+        viewer_friends = viewer.profile.friends.all()
+
+        # Intersection = mutual friends
+        return my_friends & viewer_friends
+
+   
+    # 6. Mutual friend count
+    def mutual_friend_count(self, viewer):
+        """Return total number of mutual friends with the given viewer."""
+        return self.get_mutual_friends(viewer).count()
+
+    
+    # 7. Friend count
     def friend_count(self):
         """Return total number of friends of the user."""
         return self.friends.count()
 
 
+
+# Signal: Auto-create profile on user creation
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def create_user_profile(sender, instance, created, **kwargs):
     if created:
